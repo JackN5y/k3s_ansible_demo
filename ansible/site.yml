@@ -226,7 +226,7 @@
 
     - name: "[argocd-app] Copy Application manifest to target"
       copy:
-        src:  "{{ playbook_dir }}/../argocd/application.yaml"
+        src:  "{{ playbook_dir }}/../gitops/argocd/application.yaml"
         dest: /tmp/argocd-application.yaml
         mode: "0644"
       tags: argocd_app

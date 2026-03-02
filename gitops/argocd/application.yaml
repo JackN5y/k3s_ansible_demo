@@ -15,7 +15,7 @@ spec:
   source:
     repoURL:        https://github.com/JackN5y/k3s_ansible_demo.git
     targetRevision: HEAD
-    path:           manifests          # subfolder containing the k8s manifests
+    path:           gitops/manifests   # subfolder containing the k8s manifests
 
   destination:
     server:    https://kubernetes.default.svc
