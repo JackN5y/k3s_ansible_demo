@@ -1,0 +1,255 @@
+---
+# =============================================================
+#  site.yml — k3s single-node cluster + ArgoCD bootstrap
+#
+#  Requirements:
+#    ansible-galaxy collection install -r requirements.yml
+#
+#  Usage:
+#    ansible-playbook -i hosts.ini site.yml
+#    ansible-playbook -i hosts.ini site.yml --tags sysctl,k3s
+# =============================================================
+
+- name: Bootstrap k3s + ArgoCD
+  hosts: k3s_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    k3s_version:    "v1.29.3+k3s1"
+    argocd_version: "v2.10.3"
+    kubeconfig:     /etc/rancher/k3s/k3s.yaml
+
+    # URL of the git repository ArgoCD will sync manifests from.
+    argocd_repo_url: "https://github.com/JackN5y/k3s_ansible_demo.git"
+
+    argocd_namespace: argocd
+    webapp_namespace: webapp
+
+  # ─────────────────────────────────────────────────────────────
+  # 1. Network-related sysctl tunables
+  # ─────────────────────────────────────────────────────────────
+  tasks:
+    - name: "[sysctl] Configure network parameters"
+      ansible.posix.sysctl:
+        name:   "{{ item.key }}"
+        value:  "{{ item.value }}"
+        state:  present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-k3s.conf
+      loop:
+        # Enable IPv4 packet forwarding — required by k3s/CNI
+        - { key: net.ipv4.ip_forward,           value: "1" }
+        # Allow bridge traffic to pass through iptables — required by k8s networking
+        - { key: net.bridge.bridge-nf-call-iptables,  value: "1" }
+        - { key: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+        # Increase connection backlog
+        - { key: net.core.somaxconn,            value: "65535" }
+        - { key: net.core.netdev_max_backlog,   value: "5000" }
+        # Widen local port range
+        - { key: net.ipv4.ip_local_port_range,  value: "1024 65535" }
+        # TCP keepalive — keep idle connections alive for 5 min
+        - { key: net.ipv4.tcp_keepalive_time,   value: "300" }
+        # Increase the size of the packet reception queue
+        - { key: net.ipv4.tcp_max_syn_backlog,  value: "8192" }
+      tags: sysctl
+
+    - name: "[sysctl] Load br_netfilter kernel module (needed for bridge sysctl)"
+      community.general.modprobe:
+        name:  br_netfilter
+        state: present
+      tags: sysctl
+
+    - name: "[sysctl] Persist br_netfilter across reboots"
+      copy:
+        dest:    /etc/modules-load.d/k3s.conf
+        content: "br_netfilter\n"
+        mode:    "0644"
+      tags: sysctl
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. Install k3s
+  # ─────────────────────────────────────────────────────────────
+    - name: "[k3s] Check if k3s is already installed"
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_bin
+      tags: k3s
+
+    - name: "[k3s] Download and run k3s installer (version {{ k3s_version }})"
+      shell: |
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="{{ k3s_version }}" \
+          INSTALL_K3S_EXEC="server --disable=traefik --node-name $(hostname -s)" \
+          K3S_KUBECONFIG_MODE="644" \
+          sh -
+      args:
+        executable: /bin/bash
+      when: not k3s_bin.stat.exists
+      tags: k3s
+
+    - name: "[k3s] Enable and start k3s service"
+      systemd:
+        name:          k3s
+        state:         started
+        enabled:       true
+        daemon_reload: true
+      tags: k3s
+
+    - name: "[k3s] Wait for API server (up to 3 min)"
+      wait_for:
+        host:    127.0.0.1
+        port:    6443
+        delay:   5
+        timeout: 180
+      tags: k3s
+
+    - name: "[k3s] Wait for node to be Ready"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} get nodes --no-headers \
+          | awk '{print $2}' | grep -q "^Ready$"
+      args:
+        executable: /bin/bash
+      register: node_ready
+      retries:  18
+      delay:    10
+      until:    node_ready.rc == 0
+      changed_when: false
+      tags: k3s
+
+    - name: "[k3s] Print cluster info"
+      shell: kubectl --kubeconfig={{ kubeconfig }} get nodes -o wide
+      args:
+        executable: /bin/bash
+      register: nodes
+      changed_when: false
+      tags: k3s
+
+    - debug:
+        msg: "{{ nodes.stdout_lines }}"
+      tags: k3s
+
+  # ─────────────────────────────────────────────────────────────
+  # 3. Install ArgoCD
+  # ─────────────────────────────────────────────────────────────
+    - name: "[argocd] Create argocd namespace"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          create namespace {{ argocd_namespace }} \
+          --dry-run=client -o yaml | \
+          kubectl --kubeconfig={{ kubeconfig }} apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: argocd
+
+    - name: "[argocd] Install ArgoCD {{ argocd_version }}"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          apply -n {{ argocd_namespace }} -f \
+          https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+      args:
+        executable: /bin/bash
+      register: argocd_apply
+      changed_when: "'created' in argocd_apply.stdout or 'configured' in argocd_apply.stdout"
+      tags: argocd
+
+    - name: "[argocd] Wait for argocd-server rollout (up to 5 min)"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          rollout status deployment/argocd-server \
+          -n {{ argocd_namespace }} \
+          --timeout=300s
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: argocd
+
+    - name: "[argocd] Expose argocd-server as NodePort 30443"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} patch svc argocd-server \
+          -n {{ argocd_namespace }} \
+          -p '{
+            "spec": {
+              "type": "NodePort",
+              "ports": [
+                {"port":443,"targetPort":8080,"nodePort":30443,"protocol":"TCP","name":"https"}
+              ]
+            }
+          }'
+      args:
+        executable: /bin/bash
+      changed_when: true
+      ignore_errors: true   # idempotent: fails silently if port is already set
+      tags: argocd
+
+    - name: "[argocd] Install argocd CLI"
+      get_url:
+        url:  "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_version }}/argocd-linux-amd64"
+        dest: /usr/local/bin/argocd
+        mode: "0755"
+      tags: argocd
+
+    - name: "[argocd] Retrieve initial admin password"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          get secret argocd-initial-admin-secret \
+          -n {{ argocd_namespace }} \
+          -o jsonpath="{.data.password}" | base64 -d
+      args:
+        executable: /bin/bash
+      register: argocd_password
+      changed_when: false
+      tags: argocd
+
+    - name: "[argocd] Print credentials"
+      debug:
+        msg:
+          - "ArgoCD URL  : https://{{ ansible_default_ipv4.address }}:30443"
+          - "Username    : admin"
+          - "Password    : {{ argocd_password.stdout }}"
+      tags: argocd
+
+  # ─────────────────────────────────────────────────────────────
+  # 4. Register git repo in ArgoCD and apply Application
+  # ─────────────────────────────────────────────────────────────
+    - name: "[argocd-app] Create webapp namespace"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          create namespace {{ webapp_namespace }} \
+          --dry-run=client -o yaml | \
+          kubectl --kubeconfig={{ kubeconfig }} apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: argocd_app
+
+    - name: "[argocd-app] Copy Application manifest to target"
+      copy:
+        src:  "{{ playbook_dir }}/../argocd/application.yaml"
+        dest: /tmp/argocd-application.yaml
+        mode: "0644"
+      tags: argocd_app
+
+    - name: "[argocd-app] Apply ArgoCD Application manifest"
+      shell: |
+        kubectl --kubeconfig={{ kubeconfig }} \
+          apply -f /tmp/argocd-application.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+      tags: argocd_app
+
+    - name: "[summary] All done"
+      debug:
+        msg:
+          - "================================================="
+          - "  Deployment complete"
+          - "================================================="
+          - "  Cluster API : https://{{ ansible_default_ipv4.address }}:6443"
+          - "  nginx app   : http://{{ ansible_default_ipv4.address }}:30080"
+          - "  ArgoCD UI   : https://{{ ansible_default_ipv4.address }}:30443"
+          - "  ArgoCD user : admin"
+          - "  ArgoCD pass : {{ argocd_password.stdout }}"
+          - "================================================="
+      tags: always

@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  k3s-node:
+    build:
+      context: ..          # repo root — needed so COPY . . in Dockerfile gets everything
+      dockerfile: docker/Dockerfile
+    container_name: k3s-argocd-node
+    privileged: true       # required by k3s (cgroups, iptables) and sysctl
+    tmpfs:
+      - /run               # k3s containerd needs writable /run
+      - /var/run
+    volumes:
+      - k3s-data:/var/lib/rancher/k3s   # persist cluster state across restarts
+    ports:
+      - "6443:6443"         # k3s API server
+      - "30080:30080"       # nginx  (NodePort HTTP)
+      - "30443:30443"       # ArgoCD (NodePort HTTPS)
+    environment:
+      - KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    entrypoint: >
+      bash -c "
+        ansible-playbook
+          -i /opt/k3s-demo/docker/hosts.ini
+             /opt/k3s-demo/ansible/site.yml
+        && echo '=== Setup complete. Container running. ==='
+        && tail -f /dev/null
+      "
+
+volumes:
+  k3s-data:

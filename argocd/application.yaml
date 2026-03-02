@@ -1,0 +1,36 @@
+---
+# ArgoCD Application — syncs manifests/ from the public GitHub repository:
+# https://github.com/JackN5y/k3s_ansible_demo.git
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: webapp
+  namespace: argocd
+  # Ensures child resources are removed when this Application is deleted
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL:        https://github.com/JackN5y/k3s_ansible_demo.git
+    targetRevision: HEAD
+    path:           manifests          # subfolder containing the k8s manifests
+
+  destination:
+    server:    https://kubernetes.default.svc
+    namespace: webapp
+
+  syncPolicy:
+    automated:
+      prune:     true   # remove k8s resources deleted from git
+      selfHeal:  true   # revert manual changes made directly on the cluster
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration:    5s
+        factor:      2
+        maxDuration: 3m
