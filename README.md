@@ -121,6 +121,62 @@ localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
 # 192.168.1.10 ansible_user=ubuntu ansible_become=true ansible_ssh_private_key_file=~/.ssh/id_rsa
 ```
 
+### 3a. Authorize your SSH key on the remote server (SSH target only)
+
+> Skip this step if you are targeting `localhost`.
+
+Ansible authenticates to the remote machine using an SSH key pair.
+The **private key** stays on your machine (`~/.ssh/id_rsa`).
+The **public key** must be added to the remote server's `authorized_keys`.
+
+**Step 1 — Generate a key pair (if you don't have one yet):**
+
+```bash
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
+# press Enter twice to skip passphrase (or set one for extra security)
+```
+
+This creates two files:
+```
+~/.ssh/id_rsa        ← private key (never share this)
+~/.ssh/id_rsa.pub    ← public key  (goes on the remote server)
+```
+
+**Step 2 — Copy the public key to the remote server:**
+
+```bash
+# Automated (recommended) — requires password login to work once
+ssh-copy-id -i ~/.ssh/id_rsa.pub ubuntu@192.168.1.10
+
+# Manual alternative — if ssh-copy-id is not available
+cat ~/.ssh/id_rsa.pub | ssh ubuntu@192.168.1.10 \
+  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+   cat >> ~/.ssh/authorized_keys && \
+   chmod 600 ~/.ssh/authorized_keys"
+```
+
+**Step 3 — Verify the connection works without a password:**
+
+```bash
+ssh -i ~/.ssh/id_rsa ubuntu@192.168.1.10
+# should log in without asking for a password
+```
+
+After this, Ansible can connect using:
+```
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+```
+
+```
+Your machine (Ansible control node)
+  │
+  │  SSH — authenticates with ~/.ssh/id_rsa (private key)
+  ▼
+Remote server (192.168.1.10)
+  └── ~/.ssh/authorized_keys  ← contains your public key (id_rsa.pub)
+       └── match found → access granted
+```
+
 ### 4. Run the playbook
 
 ```bash
