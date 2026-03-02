@@ -1,31 +1,93 @@
-version: "3.9"
-
 services:
   k3s-node:
     build:
-      context: ..          # repo root — needed so COPY . . in Dockerfile gets everything
+      context: ..
       dockerfile: docker/Dockerfile
     container_name: k3s-argocd-node
-    privileged: true       # required by k3s (cgroups, iptables) and sysctl
+    privileged: true
+    cgroup: host
+    stop_grace_period: 90s
     tmpfs:
-      - /run               # k3s containerd needs writable /run
+      - /run
       - /var/run
     volumes:
-      - k3s-data:/var/lib/rancher/k3s   # persist cluster state across restarts
+      - k3s-data:/var/lib/rancher/k3s
     ports:
-      - "6443:6443"         # k3s API server
-      - "30080:30080"       # nginx  (NodePort HTTP)
-      - "30443:30443"       # ArgoCD (NodePort HTTPS)
+      - "6443:6443"
+      - "30080:30080"
+      - "30443:30443"
     environment:
       - KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-    entrypoint: >
-      bash -c "
-        ansible-playbook
-          -i /opt/k3s-demo/docker/hosts.ini
-             /opt/k3s-demo/ansible/site.yml
-        && echo '=== Setup complete. Container running. ==='
-        && tail -f /dev/null
-      "
+    healthcheck:
+      test: ["CMD", "kubectl", "--kubeconfig=/etc/rancher/k3s/k3s.yaml", "get", "--raw", "/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    entrypoint:
+      - bash
+      - -c
+      - |
+        _shutdown() {
+          echo "=== Caught SIGTERM - shutting down k3s gracefully ==="
+          if [ -f /var/run/k3s.pid ]; then
+            kill -SIGTERM "$$(cat /var/run/k3s.pid)" 2>/dev/null
+            wait "$$(cat /var/run/k3s.pid)" 2>/dev/null
+          fi
+          exit 0
+        }
+        trap _shutdown SIGTERM SIGINT
+
+        SENTINEL=/var/lib/rancher/k3s/.bootstrap-complete
+
+        if [ ! -f "$$SENTINEL" ]; then
+          echo "=== First run - executing Ansible bootstrap playbook ==="
+          ansible-playbook \
+            -i /opt/k3s-demo/docker/hosts.ini \
+            /opt/k3s-demo/ansible/site.yml \
+          && touch "$$SENTINEL" \
+          && echo "=== Bootstrap complete. Sentinel written to $$SENTINEL ==="
+        else
+          echo "=== Cluster already bootstrapped — starting k3s directly ==="
+          nohup k3s server \
+            --disable=traefik \
+            --node-name k3s-node \
+            --kubelet-arg=cgroup-driver=cgroupfs \
+            --tls-san=127.0.0.1 \
+            > /var/log/k3s.log 2>&1 &
+          echo $$! > /var/run/k3s.pid
+          echo "=== k3s started (PID $$(cat /var/run/k3s.pid)) ==="
+          until kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get nodes &>/dev/null; do sleep 2; done
+          # Run cleanup in background: stale Terminating pods appear ~30s after API is ready
+          (
+            sleep 30
+            for i in 1 2 3; do
+              echo "=== Cleanup pass $$i: force-deleting stuck Terminating pods ==="
+              kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml get pods -A --no-headers \
+                | awk '$$4=="Terminating" {print $$1, $$2}' \
+                | while read ns pod; do
+                    echo "Force-deleting $$ns/$$pod"
+                    kubectl --kubeconfig=/etc/rancher/k3s/k3s.yaml \
+                      delete pod -n "$$ns" "$$pod" --force --grace-period=0 2>/dev/null || true
+                  done
+              sleep 15
+            done
+          ) &
+        fi
+
+        tail -f /dev/null &
+        wait $$!
+
+    networks:
+      k3s-net:
+        ipv4_address: 172.20.0.2
 
 volumes:
   k3s-data:
+
+networks:
+  k3s-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

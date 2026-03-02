@@ -89,6 +89,40 @@ docker compose down -v
 
 ---
 
+## Kubeconfig setup (kubectl from Windows host)
+
+After the cluster is running, copy the kubeconfig from the container and point kubectl at it:
+
+```powershell
+# 1. Copy kubeconfig from the container (re-run after every restart)
+docker cp k3s-argocd-node:/etc/rancher/k3s/k3s.yaml "$env:USERPROFILE\.kube\k3s.yaml"
+
+# 2. Set KUBECONFIG for the current PowerShell session
+$env:KUBECONFIG = "$env:USERPROFILE\.kube\k3s.yaml"
+
+# 3. Verify
+kubectl get nodes
+```
+
+To persist `KUBECONFIG` permanently across all PowerShell sessions:
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+  "KUBECONFIG",
+  "$env:USERPROFILE\.kube\k3s.yaml",
+  "User"
+)
+```
+
+> **Note:** Always re-copy the kubeconfig after `docker compose stop` / `docker compose start`
+> because the container IP may change. After `docker compose down -v` (full reset) the
+> cluster is wiped — rebuild with `docker compose up --build`.
+>
+> If you get a TLS certificate error, add `--insecure-skip-tls-verify` temporarily,
+> or do a full reset with `docker compose down -v && docker compose up --build`.
+
+---
+
 ## Ports
 
 | Port | Service |
@@ -107,6 +141,30 @@ docker compose down -v
 | `k3s` | Install k3s | Official install script, version pinned, Traefik disabled, systemd service enabled |
 | `argocd` | Install ArgoCD | Official `install.yaml` manifest, argocd-server exposed as NodePort 30443, argocd CLI installed |
 | `argocd_app` | Apply Application | Applies `gitops/argocd/application.yaml`; ArgoCD begins auto-syncing `gitops/manifests/` from GitHub |
+
+---
+
+## ArgoCD credentials
+
+**Username:** `admin`
+
+**Password** is auto-generated on first install and stored in a Kubernetes secret. Retrieve it with:
+
+```powershell
+# From your Windows host (PowerShell)
+kubectl -n argocd get secret argocd-initial-admin-secret `
+  -o jsonpath="{.data.password}" | `
+  ForEach-Object { [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($_)) }
+
+# Or from inside the container (base64 is available in bash)
+docker exec k3s-argocd-node bash -c `
+  "kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+```
+
+> After first login it is recommended to change the password via **User Info → Update Password** in the ArgoCD UI, or with:
+> ```bash
+> argocd account update-password
+> ```
 
 ---
 
