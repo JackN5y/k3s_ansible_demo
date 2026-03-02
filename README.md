@@ -33,195 +33,68 @@ Every `git push` automatically triggers a sync to the cluster — no manual `kub
 .
 ├── ansible/
 │   ├── site.yml              # main playbook — installs k3s + ArgoCD
-│   ├── requirements.yml      # Ansible Galaxy collections (sysctl, modprobe)
-│   └── hosts.ini.example     # inventory template (copy to hosts.ini)
+│   ├── requirements.yml      # Ansible Galaxy collections
+│   └── hosts.ini.example     # inventory template
 ├── manifests/                # Kubernetes manifests — synced by ArgoCD
 │   ├── namespace.yaml
 │   ├── deployment.yaml       # nginx, 2 replicas
 │   └── service.yaml          # NodePort 30080
 ├── argocd/
 │   └── application.yaml      # ArgoCD Application resource
-└── docker/                   # Windows dev helper — simulates a Linux VM
-    ├── Dockerfile
+└── docker/
+    ├── Dockerfile             # Ubuntu + Ansible + kubectl
     ├── docker-compose.yml
-    ├── hosts.ini             # Ansible inventory for use inside the container
-    └── run.ps1               # PowerShell launcher script
+    └── hosts.ini              # Ansible inventory (localhost inside container)
 ```
 
 ---
 
-## Choosing your setup path
+## Prerequisites
 
-There are two ways to run this project. Choose based on your environment:
+- [Docker](https://docs.docker.com/get-docker/) installed (Docker Desktop on Windows/Mac, Docker Engine on Linux)
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Option A — Linux (direct)                              │
-│                                                         │
-│  Your machine (Linux/Mac) = Ansible control node        │
-│  Target = local machine or remote server via SSH        │
-│                                                         │
-│  You install Ansible locally and run the playbook.      │
-│  → follow: Quick start (Linux)                          │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│  Option B — Windows (Docker)                            │
-│                                                         │
-│  Windows                                                │
-│  └── Docker container (Ubuntu image)                    │
-│       ├── Ansible  ← pre-installed in the image         │
-│       ├── kubectl  ← pre-installed in the image         │
-│       └── k3s + ArgoCD ← installed by the playbook      │
-│                                                         │
-│  Docker acts as the Linux VM. No Ansible needed         │
-│  on Windows itself.                                     │
-│  → follow: Quick start (Windows)                        │
-└─────────────────────────────────────────────────────────┘
-```
+That's it. No Ansible, no Python, no kubectl needed on your machine.
 
 ---
 
-## Quick start (Linux)
-
-> Use this if you are running on Linux or macOS and want to target a local or remote machine.
-
-### 1. Clone the repository
+## Quick start
 
 ```bash
 git clone https://github.com/JackN5y/k3s_ansible_demo.git
-cd k3s_ansible_demo
+cd k3s_ansible_demo/docker
+
+docker compose up --build
 ```
 
-### 2. Install Ansible and required collections
+Docker will build the image, run the Ansible playbook inside the container, and print at the end:
+
+```
+ArgoCD URL  : https://localhost:30443  (user: admin)
+nginx app   : http://localhost:30080
+```
+
+**Other commands:**
 
 ```bash
-pip3 install ansible
-ansible-galaxy collection install -r ansible/requirements.yml
-```
+# Rebuild the image from scratch
+docker compose up --build --force-recreate
 
-> `requirements.yml` installs the `ansible.posix` and `community.general` collections
-> used by the `sysctl` and `modprobe` tasks in the playbook.
+# Open a shell inside the running container
+docker exec -it k3s-argocd-node bash
 
-### 3. Configure inventory
-
-```bash
-cp ansible/hosts.ini.example ansible/hosts.ini
-```
-
-Edit `hosts.ini` based on your target:
-
-```ini
-# Target = this machine (localhost)
-[k3s_servers]
-localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
-
-# Target = remote server via SSH
-# [k3s_servers]
-# 192.168.1.10 ansible_user=ubuntu ansible_become=true ansible_ssh_private_key_file=~/.ssh/id_rsa
-```
-
-### 3a. Authorize your SSH key on the remote server (SSH target only)
-
-> Skip this step if you are targeting `localhost`.
-
-Ansible authenticates to the remote machine using an SSH key pair.
-The **private key** stays on your machine (`~/.ssh/id_rsa`).
-The **public key** must be added to the remote server's `authorized_keys`.
-
-**Step 1 — Generate a key pair (if you don't have one yet):**
-
-```bash
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
-# press Enter twice to skip passphrase (or set one for extra security)
-```
-
-This creates two files:
-```
-~/.ssh/id_rsa        ← private key (never share this)
-~/.ssh/id_rsa.pub    ← public key  (goes on the remote server)
-```
-
-**Step 2 — Copy the public key to the remote server:**
-
-```bash
-# Automated (recommended) — requires password login to work once
-ssh-copy-id -i ~/.ssh/id_rsa.pub ubuntu@192.168.1.10
-
-# Manual alternative — if ssh-copy-id is not available
-cat ~/.ssh/id_rsa.pub | ssh ubuntu@192.168.1.10 \
-  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
-   cat >> ~/.ssh/authorized_keys && \
-   chmod 600 ~/.ssh/authorized_keys"
-```
-
-**Step 3 — Verify the connection works without a password:**
-
-```bash
-ssh -i ~/.ssh/id_rsa ubuntu@192.168.1.10
-# should log in without asking for a password
-```
-
-After this, Ansible can connect using:
-```
-ansible_ssh_private_key_file=~/.ssh/id_rsa
-```
-
-```
-Your machine (Ansible control node)
-  │
-  │  SSH — authenticates with ~/.ssh/id_rsa (private key)
-  ▼
-Remote server (192.168.1.10)
-  └── ~/.ssh/authorized_keys  ← contains your public key (id_rsa.pub)
-       └── match found → access granted
-```
-
-### 4. Run the playbook
-
-```bash
-ansible-playbook -i ansible/hosts.ini ansible/site.yml
-```
-
-At the end of the run, the playbook prints:
-
-```
-ArgoCD URL  : https://<node-ip>:30443
-Username    : admin
-Password    : <generated>
-nginx app   : http://<node-ip>:30080
+# Stop and remove everything
+docker compose down -v
 ```
 
 ---
 
-## Quick start (Windows)
-
-> Use this if you are on Windows. Docker acts as the Linux VM — no Ansible installation needed.
-
-**Requirement:** Docker Desktop with Linux containers / WSL2 backend.
-
-```powershell
-git clone https://github.com/JackN5y/k3s_ansible_demo.git
-cd k3s_ansible_demo\docker
-
-Set-ExecutionPolicy -Scope Process RemoteSigned
-
-.\run.ps1           # build image, run playbook, tail logs
-.\run.ps1 -Rebuild  # force rebuild of the Docker image
-.\run.ps1 -Shell    # open bash shell inside the running container
-.\run.ps1 -Stop     # stop and remove the container + volume
-```
-
-Docker forwards these ports to `localhost` on Windows:
+## Ports
 
 | Port | Service |
 |------|---------|
 | `30080` | nginx — http://localhost:30080 |
 | `30443` | ArgoCD UI — https://localhost:30443 |
 | `6443` | k3s API server |
-
-> Ansible collections (`requirements.yml`) are installed automatically during `docker build`.
-> You do not need Ansible on Windows.
 
 ---
 
@@ -234,30 +107,14 @@ Docker forwards these ports to `localhost` on Windows:
 | `argocd` | Install ArgoCD | Official `install.yaml` manifest, argocd-server exposed as NodePort 30443, argocd CLI installed |
 | `argocd_app` | Apply Application | Applies `argocd/application.yaml`; ArgoCD begins auto-syncing `manifests/` from GitHub |
 
-Run individual steps using tags:
-
-```bash
-ansible-playbook -i ansible/hosts.ini ansible/site.yml --tags sysctl
-ansible-playbook -i ansible/hosts.ini ansible/site.yml --tags k3s,argocd
-```
-
----
-
-## ArgoCD Application
-
-[argocd/application.yaml](argocd/application.yaml) configures ArgoCD to:
-
-- Watch the `manifests/` directory in this repository (`https://github.com/JackN5y/k3s_ansible_demo.git`)
-- Auto-sync on every commit (`automated.selfHeal: true`)
-- Remove resources deleted from git (`prune: true`)
-- Retry failed syncs up to 5 times with exponential backoff
-
 ---
 
 ## Verify the deployment
 
 ```bash
-# on the Linux machine, or inside the Docker container (.\run.ps1 -Shell on Windows)
+# inside the container
+docker exec -it k3s-argocd-node bash
+
 kubectl get nodes
 kubectl get pods -A
 kubectl get svc  -n webapp
