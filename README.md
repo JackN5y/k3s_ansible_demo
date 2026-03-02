@@ -170,14 +170,151 @@ docker exec k3s-argocd-node bash -c `
 
 ## Verify the deployment
 
+### 1. Running the playbook
+
 ```bash
-# inside the container
+cd k3s_ansible_demo/docker
+docker compose up --build
+```
+
+Watch the logs — bootstrap is complete when you see:
+
+```
+PLAY RECAP *********************************************************************
+localhost : ok=XX  changed=XX  unreachable=0  failed=0
+=== Bootstrap complete. Sentinel written to /var/lib/rancher/k3s/.bootstrap-complete ===
+```
+
+The entire first-run bootstrap (k3s + ArgoCD + nginx) takes **5–10 minutes** depending on download speed.
+On subsequent starts (`docker compose stop` / `docker compose start`) it skips the playbook and starts in **~4–6 minutes**.
+
+To follow logs after detaching:
+
+```bash
+docker compose logs -f
+```
+
+---
+
+### 2. Cluster state
+
+Run from **inside the container** or from the **Windows host** after [kubeconfig setup](#kubeconfig-setup-kubectl-from-windows-host).
+
+```bash
+# Node status — should show Ready
+kubectl get nodes
+
+# All pods — all should be Running (0 restarts expected)
+kubectl get pods -A
+
+# webapp service — confirms NodePort 30080 is assigned
+kubectl get svc -n webapp
+```
+
+**Expected healthy output:**
+
+```
+NAME       STATUS   ROLES                  AGE   VERSION
+k3s-node   Ready    control-plane,master   5m    v1.29.3+k3s1
+
+NAMESPACE     NAME                                      READY   STATUS    RESTARTS
+argocd        argocd-application-controller-0            1/1     Running   0
+argocd        argocd-applicationset-controller-...       1/1     Running   0
+argocd        argocd-dex-server-...                      1/1     Running   0
+argocd        argocd-notifications-controller-...        1/1     Running   0
+argocd        argocd-redis-...                           1/1     Running   0
+argocd        argocd-repo-server-...                     1/1     Running   0
+argocd        argocd-server-...                          1/1     Running   0
+kube-system   coredns-...                                1/1     Running   0
+kube-system   local-path-provisioner-...                 1/1     Running   0
+kube-system   metrics-server-...                         1/1     Running   0
+webapp        nginx-...                                  1/1     Running   0
+webapp        nginx-...                                  1/1     Running   0
+
+NAME      TYPE       CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE
+nginx-svc NodePort   10.43.x.x    <none>        80:30080/TCP   4m
+```
+
+> The node shows `NotReady` for the first ~5 minutes after start — this is normal while Flannel networking initialises.
+
+---
+
+### 3. ArgoCD verification
+
+Check that the ArgoCD Application is **Synced** and **Healthy**:
+
+```bash
+# Summary — Status should be: Synced / Healthy
+kubectl get application webapp -n argocd
+
+# Full detail — shows sync revision, last sync time, and any errors
+kubectl describe application webapp -n argocd
+```
+
+**Expected output:**
+
+```
+NAME     SYNC STATUS   HEALTH STATUS
+webapp   Synced        Healthy
+```
+
+**From inside the container using the ArgoCD CLI:**
+
+```bash
 docker exec -it k3s-argocd-node bash
 
-kubectl get nodes
-kubectl get pods -A
-kubectl get svc  -n webapp
-kubectl get app  webapp -n argocd
+# Log in (get password first — see ArgoCD credentials section)
+argocd login localhost:30443 --username admin --password <PASSWORD> --insecure
+
+# Application status
+argocd app get webapp
+
+# Trigger a manual sync (optional)
+argocd app sync webapp
+```
+
+**ArgoCD UI:** open https://localhost:30443 in your browser (accept the self-signed certificate).
+Log in as `admin` with the password retrieved from the secret.
+The `webapp` application should appear as **Synced ✓ Healthy ✓**.
+
+---
+
+### 4. Application availability
+
+Confirm the nginx app responds on port 30080:
+
+```bash
+# From Windows host (PowerShell)
+curl http://localhost:30080
+
+# Or simply open in a browser
+start http://localhost:30080
+```
+
+**Expected response:** HTTP 200 with the default nginx welcome page:
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Welcome to nginx!</title></head>
+...
+```
+
+From **inside the container:**
+
+```bash
+docker exec k3s-argocd-node curl -s -o /dev/null -w "%{http_code}" http://localhost:30080
+# Expected: 200
+```
+
+**End-to-end GitOps test** — verify ArgoCD auto-sync is working:
+
+```bash
+# 1. Edit gitops/manifests/deployment.yaml and change replicas: 2 → 3
+# 2. git commit -am "scale nginx to 3" && git push
+# 3. Within ~3 minutes ArgoCD auto-syncs; verify:
+kubectl get pods -n webapp
+# Expected: 3 nginx pods Running
 ```
 
 ---
